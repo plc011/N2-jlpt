@@ -57,6 +57,18 @@ header p{margin:0;color:var(--sub);font-size:13px;line-height:1.7}
   cursor:pointer;font-family:inherit;letter-spacing:.05em}
 .next:hover{opacity:.88}
 .next:disabled{opacity:.25;cursor:default}
+.speakrow{display:flex;gap:8px;margin-top:12px;flex-wrap:wrap}
+.spk{border:1px solid var(--line);background:#fff;border-radius:8px;padding:7px 13px;font-size:13px;
+  color:#374151;cursor:pointer;font-family:inherit}
+.spk:hover{border-color:#c9ccd3}
+.spk:active{transform:scale(.98)}
+.voicehint{margin-top:10px;font-size:12.5px;color:#b45309;line-height:1.7}
+.spk.star{color:#b45309}
+.listtop{display:flex;gap:8px;align-items:center;margin-bottom:12px}
+.listtop .ghost{padding:6px 12px;font-size:13px}
+.listtop .on{border-color:var(--ink);color:var(--ink)}
+.favc{width:30px;text-align:center;cursor:pointer;color:#f59e0b;font-size:16px;user-select:none}
+.favc.off{color:#d1d5db}
 .empty{text-align:center;color:var(--sub);font-size:14px;line-height:2.2;padding:26px 0}
 table{width:100%;border-collapse:collapse;font-size:14px}
 th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line)}
@@ -93,6 +105,8 @@ footer{margin-top:20px;color:#9aa0aa;font-size:11.5px;line-height:1.9;text-align
     <button data-v="600">Top 600</button>
     <button data-v="9999" class="on">全部</button>
   </div>
+  <button class="ghost" id="btnSpeak">自动朗读：开</button>
+  <button class="ghost" id="btnFav">收藏 (0)</button>
   <button class="ghost" id="btnWrong">只练错题 (0)</button>
   <button class="ghost" id="btnList">词表</button>
 </div>
@@ -121,6 +135,7 @@ footer{margin-top:20px;color:#9aa0aa;font-size:11.5px;line-height:1.9;text-align
 
 <div id="listView" class="hidden">
   <div class="card">
+    <div class="listtop"><button class="ghost" id="btnListFav">只看收藏</button></div>
     <input class="search" id="search" placeholder="搜索汉字 / 假名 / 中文释义…">
     <div class="list" id="listBox"></div>
   </div>
@@ -134,18 +149,52 @@ const LS = "n2quiz_v1";
 let st = {};
 try { st = JSON.parse(localStorage.getItem(LS) || "{}") || {}; } catch(e) { st = {}; }
 if(!st.wrong) st.wrong = {};
+if(!st.fav) st.fav = {};
 
-let mode = "r", range = 9999, wrongOnly = false;
+let mode = "r", range = 9999, wrongOnly = false, favOnly = false, listFavOnly = false;
+let autoSpeak = st.autoSpeak !== false;
+let jaVoice = null, voiceWarned = false;
+
+function pickVoice(){
+  if(!('speechSynthesis' in window)) return null;
+  const vs = speechSynthesis.getVoices() || [];
+  jaVoice = vs.find(v => /^ja[-_]JP/i.test(v.lang)) || vs.find(v => /^ja/i.test(v.lang)) || null;
+  return jaVoice;
+}
+if('speechSynthesis' in window){
+  pickVoice();
+  speechSynthesis.onvoiceschanged = pickVoice;
+}
+function speak(text, rate){
+  if(!('speechSynthesis' in window)) return;
+  try{
+    if(speechSynthesis.speaking || speechSynthesis.pending) speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance(text);
+    u.lang = 'ja-JP';
+    u.rate = rate || 0.9;
+    const v = pickVoice();
+    if(v) u.voice = v;
+    speechSynthesis.speak(u);
+  }catch(e){}
+}
+function voiceHint(){
+  if(voiceWarned || pickVoice()) return "";
+  voiceWarned = true;
+  return '<div class="voicehint">这台设备好像没装日语语音，朗读可能不准。iPhone：设置 → 辅助功能 → 朗读内容 → 声音 → 日语；Windows：设置 → 时间和语言 → 语言 → 添加日语 → 语音包。</div>';
+}
 let queue = [], idx = 0, answered = false, cur = null;
 let stat = {n:0, ok:0, streak:0};
 
 function save(){ try { localStorage.setItem(LS, JSON.stringify(st)); } catch(e) {} }
 
 function buildQueue(){
-  let pool = QUESTIONS.filter(q => wrongOnly || q.rank <= range);
+  let pool = QUESTIONS.filter(q => (wrongOnly || favOnly) ? true : q.rank <= range);
   if(mode !== "m") pool = pool.filter(q => q.t === mode);
   if(wrongOnly){
     pool = pool.filter(q => st.wrong[q.t + ":" + q.k + ":" + q.r]);
+  }
+  if(favOnly){
+    pool = pool.filter(q => st.fav[q.k + ":" + q.r]);
   }
   // 每题选项里补上正确答案并打乱
   queue = pool.map(q => {
@@ -171,6 +220,7 @@ function render(){
   document.getElementById("mRight").textContent = `正确率 ${acc}　连对 ${stat.streak}`;
   document.getElementById("bar").style.width = (total ? (idx/total*100) : 0) + "%";
   document.getElementById("btnWrong").textContent = `只练错题 (${Object.keys(st.wrong).length})`;
+  document.getElementById("btnFav").textContent = `收藏 (${Object.keys(st.fav).length})`;
 
   const optsBox = document.getElementById("opts");
   const fb = document.getElementById("fb");
@@ -243,7 +293,23 @@ function choose(i){
   fb.innerHTML =
     `<div class="res ${ok?"ok":"bad"}">${ok ? "✓ 正确" : "✗ 错了"}</div>` +
     `<div class="ans"><b>${q.k}</b>　${q.r}　<span style="color:var(--sub)">${q.zh}</span></div>` +
-    `<div class="stat">该词在全真题中出现 ${q.cnt} 次，覆盖 ${q.papers} 套 · 词频排名第 ${q.rank}</div>`;
+    `<div class="stat">该词在全真题中出现 ${q.cnt} 次，覆盖 ${q.papers} 套 · 词频排名第 ${q.rank}</div>` +
+    `<div class="speakrow"><button class="spk" data-rate="0.9">🔊 听读音</button>` +
+    `<button class="spk" data-rate="0.55">🐢 慢速跟读</button>` +
+    `<button class="spk star" id="btnStar">${st.fav[q.k + ":" + q.r] ? "★ 已收藏" : "☆ 收藏"}</button></div>` +
+    voiceHint();
+  fb.querySelectorAll(".spk").forEach(b => {
+    b.onclick = () => speak(q.r, parseFloat(b.dataset.rate));
+  });
+  const starBtn = document.getElementById("btnStar");
+  if(starBtn) starBtn.onclick = () => {
+    const fk = q.k + ":" + q.r;
+    if(st.fav[fk]) delete st.fav[fk]; else st.fav[fk] = 1;
+    save();
+    starBtn.textContent = st.fav[fk] ? "★ 已收藏" : "☆ 收藏";
+    renderMeta();
+  };
+  if(autoSpeak) speak(q.r, 0.9);
 
   document.getElementById("btnNext").disabled = false;
   renderMeta();
@@ -258,6 +324,7 @@ function renderMeta(){
 
 document.getElementById("btnNext").onclick = nextQ;
 function nextQ(){
+  if('speechSynthesis' in window) { try{ speechSynthesis.cancel(); }catch(e){} }
   if(queue.length && idx >= queue.length){ buildQueue(); return; }
   if(!answered && queue.length){ return; }
   idx++; render();
@@ -278,10 +345,27 @@ document.querySelectorAll("#segRange button").forEach(b => b.onclick = () => {
   b.classList.add("on"); range = parseInt(b.dataset.v); buildQueue();
 });
 
+const btnSpeak = document.getElementById("btnSpeak");
+btnSpeak.textContent = "自动朗读：" + (autoSpeak ? "开" : "关");
+btnSpeak.onclick = () => {
+  autoSpeak = !autoSpeak;
+  st.autoSpeak = autoSpeak;
+  save();
+  btnSpeak.textContent = "自动朗读：" + (autoSpeak ? "开" : "关");
+};
+
 document.getElementById("btnWrong").onclick = () => {
   wrongOnly = !wrongOnly;
   document.getElementById("btnWrong").style.color = wrongOnly ? "var(--ink)" : "";
   document.getElementById("btnWrong").style.borderColor = wrongOnly ? "var(--ink)" : "";
+  buildQueue();
+};
+
+document.getElementById("btnFav").onclick = () => {
+  favOnly = !favOnly;
+  const b = document.getElementById("btnFav");
+  b.style.color = favOnly ? "var(--ink)" : "";
+  b.style.borderColor = favOnly ? "var(--ink)" : "";
   buildQueue();
 };
 
@@ -295,23 +379,40 @@ document.getElementById("btnList").onclick = () => {
   if(showList) drawList("");
 };
 
+document.getElementById("btnListFav").onclick = () => {
+  listFavOnly = !listFavOnly;
+  document.getElementById("btnListFav").classList.toggle("on", listFavOnly);
+  drawList(document.getElementById("search").value.trim());
+};
+
 const search = document.getElementById("search");
 search.oninput = () => drawList(search.value.trim());
 
 function drawList(kw){
   const box = document.getElementById("listBox");
   let rows = WORDS;
+  if(listFavOnly) rows = rows.filter(r => st.fav[r[1] + ":" + r[2]]);
   if(kw){
     const k = kw.toLowerCase();
     rows = rows.filter(r => (r[1]||"").includes(kw) || r[2].includes(kw) || (r[3]||"").toLowerCase().includes(k));
   }
-  let html = `<table><thead><tr><th>#</th><th>词</th><th>假名</th><th>释义</th><th>出现</th></tr></thead><tbody>`;
+  let html = `<table><thead><tr><th>★</th><th>#</th><th>词</th><th>假名</th><th>释义</th><th>出现</th></tr></thead><tbody>`;
   for(const r of rows){
-    html += `<tr><td class="rk">${r[0]}</td><td class="k">${r[1]||r[2]}</td><td class="kana">${r[1]?r[2]:""}</td>` +
+    const fk = r[1] + ":" + r[2];
+    html += `<tr><td class="favc${st.fav[fk] ? "" : " off"}" data-fk="${fk}">${st.fav[fk] ? "★" : "☆"}</td>` +
+            `<td class="rk">${r[0]}</td><td class="k">${r[1]||r[2]}</td><td class="kana">${r[1]?r[2]:""}</td>` +
             `<td class="zh">${r[3]||""}</td><td class="n">${r[4]} 次 / ${r[5]} 套</td></tr>`;
   }
   html += `</tbody></table>`;
   box.innerHTML = rows.length ? html : `<div class="empty">没有匹配的词</div>`;
+  box.querySelectorAll(".favc").forEach(td => td.onclick = () => {
+    const fk = td.dataset.fk;
+    if(st.fav[fk]) delete st.fav[fk]; else st.fav[fk] = 1;
+    save();
+    td.textContent = st.fav[fk] ? "★" : "☆";
+    td.classList.toggle("off", !st.fav[fk]);
+    renderMeta();
+  });
 }
 
 buildQueue();
